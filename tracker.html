@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Real-Time Phone Tracker</title>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: Arial; background: #1e1e2e; color: white; }
+        #map { height: 70vh; }
+        .controls { padding: 20px; background: #2a2a3e; }
+        button { padding: 12px 24px; margin: 5px; background: #00d4ff; border: none; border-radius: 8px; color: white; font-weight: bold; cursor: pointer; }
+        button:hover { background: #00b8d4; }
+        button:disabled { background: #666; cursor: not-allowed; }
+        .status { margin: 10px 0; font-weight: bold; }
+        .user-list { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+        .user { padding: 8px 12px; background: rgba(0,212,255,0.2); border-radius: 20px; }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <input id="username" placeholder="Your Name" maxlength="15">
+        <button id="startTracking">Start Tracking 📍</button>
+        <button id="stopTracking">Stop Tracking</button>
+        <div id="status" class="status">Click Start to begin tracking</div>
+        <div id="users"></div>
+    </div>
+    <div id="map"></div>
+
+    <script>
+        const socket = io('https://location-tracker-123.herokuapp.com'); // Use your server or demo server
+        let map, myMarker, watchId, userMarkers = {}, username = '';
+        
+        // Initialize map
+        map = L.map('map').setView([12.97, 77.59], 13); // Coimbatore default
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+        // UI Events
+        document.getElementById('startTracking').onclick = startTracking;
+        document.getElementById('stopTracking').onclick = stopTracking;
+
+        function startTracking() {
+            username = document.getElementById('username').value || 'Anonymous';
+            if (!username) return alert('Enter a name');
+            
+            if (navigator.geolocation) {
+                document.getElementById('status').textContent = 'Requesting location permission...';
+                watchId = navigator.geolocation.watchPosition(
+                    sendLocation, 
+                    error => {
+                        document.getElementById('status').textContent = 'Location access denied';
+                        document.getElementById('startTracking').disabled = false;
+                    },
+                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+                );
+                socket.emit('join', username);
+                document.getElementById('startTracking').disabled = true;
+            } else {
+                alert('Geolocation not supported');
+            }
+        }
+
+        function stopTracking() {
+            if (watchId) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+            }
+            socket.emit('leave', username);
+            document.getElementById('startTracking').disabled = false;
+            document.getElementById('status').textContent = 'Tracking stopped';
+            if (myMarker) map.removeLayer(myMarker);
+        }
+
+        // Send location to server every update
+        function sendLocation(position) {
+            const data = {
+                username: username,
+                lat: position.coords.latitude,
+                lng: position.coords.longitude,
+                accuracy: position.coords.accuracy,
+                timestamp: Date.now()
+            };
+            
+            socket.emit('locationUpdate', data);
+            document.getElementById('status').textContent = 
+                `Tracking: ${data.lat.toFixed(4)}, ${data.lng.toFixed(4)} (±${data.accuracy.toFixed(0)}m)`;
+            
+            // Update my marker
+            if (myMarker) map.removeLayer(myMarker);
+            myMarker = L.circleMarker([data.lat, data.lng], {
+                radius: 10, color: '#00d4ff', fillOpacity: 0.7
+            }).addTo(map).bindPopup(`You<br>${data.accuracy.toFixed(0)}m accuracy`);
+            map.setView([data.lat, data.lng], 16);
+        }
+
+        // Receive other users' locations
+        socket.on('locations', (locations) => {
+            document.getElementById('users').innerHTML = Object.keys(locations)
+                .filter(u => u !== username)
+                .map(u => `<span class="user">${u}</span>`).join('') || 'No other users';
+                
+            Object.entries(locations).forEach(([user, data]) => {
+                if (user === username) return;
+                
+                if (userMarkers[user]) {
+                    map.removeLayer(userMarkers[user]);
+                }
+                
+                const age = Date.now() - data.timestamp;
+                const isOnline = age < 30000; // 30s timeout
+                
+                userMarkers[user] = L.circleMarker([data.lat, data.lng], {
+                    radius: 8, 
+                    color: isOnline ? '#ff6b6b' : '#666',
+                    fillOpacity: 0.6
+                }).addTo(map).bindPopup(`${user}<br>${(age/1000).toFixed(0)}s ago`);
+            });
+        });
+
+        // Clean up old markers
+        socket.on('userLeft', (user) => {
+            if (userMarkers[user]) {
+                map.removeLayer(userMarkers[user]);
+                delete userMarkers[user];
+            }
+        });
+    </script>
+</body>
+</html>
